@@ -1,166 +1,34 @@
 <?xml version="1.0" encoding="utf-8"?>
-<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    android:layout_width="match_parent"
-    android:layout_height="match_parent"
-    android:background="#000000"
-    android:keepScreenOn="true">
-
-    <br.dualcam.app.AspectFrameLayout
-        android:id="@+id/previewBox"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:layout_gravity="center">
-
-        <SurfaceView
-            android:id="@+id/surfaceView"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent" />
-
-        <br.dualcam.app.CropOverlayView
-            android:id="@+id/overlay"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent" />
-    </br.dualcam.app.AspectFrameLayout>
-
-    <LinearLayout
-        android:id="@+id/topBar"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="top|start"
-        android:orientation="horizontal"
-        android:padding="6dp">
-
-        <TextView
-            android:id="@+id/btnLens"
-            style="@style/Chip"
-            android:text="LENTE" />
-
-        <TextView
-            android:id="@+id/btnRes"
-            style="@style/Chip"
-            android:text="1080p" />
-
-        <TextView
-            android:id="@+id/btnFps"
-            style="@style/Chip"
-            android:text="30fps" />
-
-        <TextView
-            android:id="@+id/btnCodec"
-            style="@style/Chip"
-            android:text="H.265" />
-
-        <TextView
-            android:id="@+id/btnZebra"
-            style="@style/Chip"
-            android:text="ZEBRA" />
-
-        <TextView
-            android:id="@+id/btnGrid"
-            style="@style/Chip"
-            android:text="GRADE" />
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android" android:layout_width="match_parent" android:layout_height="match_parent" android:orientation="horizontal" android:background="#0B1017" android:keepScreenOn="true" android:fitsSystemWindows="true">
+ <LinearLayout android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent" android:orientation="vertical">
+  <HorizontalScrollView android:layout_width="match_parent" android:layout_height="58dp" android:scrollbars="none" android:fillViewport="true" android:background="#121B27">
+   <LinearLayout android:id="@+id/topBar" android:layout_width="wrap_content" android:layout_height="match_parent" android:gravity="center_vertical" android:paddingStart="8dp" android:paddingEnd="8dp" android:orientation="horizontal"><TextView android:id="@+id/btnLens" style="@style/Chip" android:text="LENTE" /><TextView android:id="@+id/btnRes" style="@style/Chip" android:text="1080p" /><TextView android:id="@+id/btnFps" style="@style/Chip" android:text="30fps" /><TextView android:id="@+id/btnCodec" style="@style/Chip" android:text="H.264" /><TextView android:id="@+id/btnZebra" style="@style/Chip" android:text="ZEBRA" /><TextView android:id="@+id/btnGrid" style="@style/Chip" android:text="GRADE" /></LinearLayout>
+  </HorizontalScrollView>
+  <FrameLayout android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" android:background="#000000">
+   <br.dualcam.app.AspectFrameLayout android:id="@+id/previewBox" android:layout_width="match_parent" android:layout_height="match_parent" android:layout_gravity="center">
+    <SurfaceView android:id="@+id/surfaceView" android:layout_width="match_parent" android:layout_height="match_parent" />
+    <br.dualcam.app.CropOverlayView android:id="@+id/overlay" android:layout_width="match_parent" android:layout_height="match_parent" />
+   </br.dualcam.app.AspectFrameLayout>
+  </FrameLayout>
+  <LinearLayout android:id="@+id/bottomPanel" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="6dp" android:background="#121B27">
+   <LinearLayout android:id="@+id/sliderRow" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="6dp" android:visibility="gone" android:background="@drawable/panel_bg">
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="center_vertical" android:orientation="horizontal">
+     <TextView android:id="@+id/txtParam" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:textColor="#BAC9DC" android:textSize="12sp" />
+     <TextView android:id="@+id/txtValue" android:layout_width="wrap_content" android:layout_height="wrap_content" android:textColor="#64D8CB" android:textSize="16sp" android:textStyle="bold" android:paddingEnd="8dp" />
+     <TextView android:id="@+id/btnAuto" style="@style/Chip" android:text="AUTO" />
     </LinearLayout>
-
-    <TextView
-        android:id="@+id/txtTimer"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="top|end"
-        android:layout_margin="14dp"
-        android:text="● 00:00"
-        android:textColor="#FFFF3B30"
-        android:textSize="16sp"
-        android:textStyle="bold"
-        android:visibility="invisible" />
-
-    <br.dualcam.app.RecordButton
-        android:id="@+id/btnRecord"
-        android:layout_width="72dp"
-        android:layout_height="72dp"
-        android:layout_gravity="end|center_vertical"
-        android:layout_marginEnd="28dp" />
-
-    <LinearLayout
-        android:id="@+id/bottomPanel"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_gravity="bottom"
-        android:layout_marginEnd="130dp"
-        android:orientation="vertical"
-        android:padding="6dp">
-
-        <LinearLayout
-            android:id="@+id/sliderRow"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginBottom="6dp"
-            android:background="@drawable/panel_bg"
-            android:gravity="center_vertical"
-            android:orientation="horizontal"
-            android:padding="8dp"
-            android:visibility="gone">
-
-            <TextView
-                android:id="@+id/txtParam"
-                android:layout_width="64dp"
-                android:layout_height="wrap_content"
-                android:gravity="center"
-                android:text="ISO"
-                android:textColor="#FFFFFF"
-                android:textSize="13sp"
-                android:textStyle="bold" />
-
-            <SeekBar
-                android:id="@+id/seek"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1" />
-
-            <TextView
-                android:id="@+id/txtValue"
-                android:layout_width="88dp"
-                android:layout_height="wrap_content"
-                android:gravity="center"
-                android:text="100"
-                android:textColor="#FFB300"
-                android:textSize="13sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:id="@+id/btnAuto"
-                style="@style/Chip"
-                android:text="AUTO" />
-        </LinearLayout>
-
-        <LinearLayout
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal">
-
-            <TextView
-                android:id="@+id/chipEv"
-                style="@style/Chip"
-                android:text="EV +0.0" />
-
-            <TextView
-                android:id="@+id/chipIso"
-                style="@style/Chip"
-                android:text="ISO" />
-
-            <TextView
-                android:id="@+id/chipShutter"
-                style="@style/Chip"
-                android:text="1/60" />
-
-            <TextView
-                android:id="@+id/chipWb"
-                style="@style/Chip"
-                android:text="WB AUTO" />
-
-            <TextView
-                android:id="@+id/chipFocus"
-                style="@style/Chip"
-                android:text="AF" />
-        </LinearLayout>
-    </LinearLayout>
-</FrameLayout>
+    <SeekBar android:id="@+id/seek" android:layout_width="match_parent" android:layout_height="40dp" android:progressTint="#64D8CB" android:thumbTint="#64D8CB" />
+   </LinearLayout>
+   <HorizontalScrollView android:layout_width="match_parent" android:layout_height="52dp" android:scrollbars="none" android:fillViewport="true">
+    <LinearLayout android:layout_width="wrap_content" android:layout_height="match_parent" android:gravity="center_vertical" android:orientation="horizontal"><TextView android:id="@+id/chipEv" style="@style/Chip" android:text="EV +0.0" /><TextView android:id="@+id/chipIso" style="@style/Chip" android:text="ISO AUTO" /><TextView android:id="@+id/chipShutter" style="@style/Chip" android:text="OBTURADOR" /><TextView android:id="@+id/chipWb" style="@style/Chip" android:text="WB AUTO" /><TextView android:id="@+id/chipFocus" style="@style/Chip" android:text="FOCO AUTO" /></LinearLayout>
+   </HorizontalScrollView>
+  </LinearLayout>
+ </LinearLayout>
+ <LinearLayout android:layout_width="108dp" android:layout_height="match_parent" android:orientation="vertical" android:gravity="center" android:padding="8dp" android:background="#0B1017">
+  <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="DUALCAM" android:textColor="#FFFFFF" android:textSize="12sp" android:textStyle="bold" android:letterSpacing="0.12" />
+  <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="16:9 + 9:16" android:textColor="#8CA0B8" android:textSize="10sp" android:layout_marginTop="6dp" android:layout_marginBottom="20dp" />
+  <br.dualcam.app.RecordButton android:id="@+id/btnRecord" android:layout_width="72dp" android:layout_height="72dp" android:contentDescription="Iniciar ou parar gravação" />
+  <TextView android:id="@+id/btnReset" style="@style/Chip" android:text="RESET" android:layout_marginTop="12dp" android:contentDescription="Restaurar controles automáticos" />
+  <TextView android:id="@+id/txtTimer" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="16dp" android:text="● 00:00" android:textColor="#FF7B80" android:textSize="13sp" android:visibility="invisible" />
+ </LinearLayout>
+</LinearLayout>

@@ -20,7 +20,9 @@ import android.util.Log
 import android.util.Range
 import android.util.Size
 import android.view.Surface
-import kotlin.math.ceil
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlin.math.floor
 import kotlin.math.hypot
 import kotlin.math.roundToInt
 
@@ -47,6 +49,8 @@ class CamInfo(
     val minFocusDiopter: Float,
     val manualSensor: Boolean,
     val manualPost: Boolean,
+    val manualFocus: Boolean,
+    val autoFocusMode: Int,
     val aeFpsRanges: List<Range<Int>>,
     val realtimeTs: Boolean,
     val evRange: Range<Int>,
@@ -93,6 +97,7 @@ class CameraEngine(ctx: Context, private val listener: Listener) {
     @Volatile
     private var baseTransform: ColorSpaceTransform? = null
     private var lastNotify = 0L
+    @Volatile private var generation = 0
 
     // ---------------------------------------------------------------- descoberta
 
@@ -148,6 +153,14 @@ class CameraEngine(ctx: Context, private val listener: Listener) {
             minFocusDiopter = c.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f,
             manualSensor = caps.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR),
             manualPost = caps.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_POST_PROCESSING),
+            manualFocus = c.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES)?.contains(CameraMetadata.CONTROL_AF_MODE_OFF) == true,
+            autoFocusMode = (c.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES) ?: intArrayOf()).let { modes ->
+                when {
+                    CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO in modes -> CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO
+                    CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE in modes -> CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+                    else -> CameraMetadata.CONTROL_AF_MODE_OFF
+                }
+            },
             aeFpsRanges = fpsRanges,
             realtimeTs = c.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE) ==
                 CameraMetadata.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME,
@@ -162,7 +175,7 @@ class CameraEngine(ctx: Context, private val listener: Listener) {
     /** Frame rates que essa resolução aceita neste aparelho. */
     fun fpsOptions(inf: CamInfo, size: Size): List<Int> {
         val minDur = inf.map.getOutputMinFrameDuration(SurfaceTexture::class.java, size)
-        val maxFps = if (minDur > 0L) ceil(1e9 / minDur.toDouble()).toInt() else 30
+        val maxFps = if (minDur > 0L) floor(1e9 / minDur.toDouble() + 0.01).toInt() else 30
         return listOf(24, 25, 30, 60).filter { f ->
             f <= maxFps && inf.aeFpsRanges.any { r -> r.lower <= f && r.upper >= f }
         }
@@ -175,11 +188,12 @@ class CameraEngine(ctx: Context, private val listener: Listener) {
     }
 
     /** O balanço de branco manual só funciona depois que o AWB automático já mediu a cena. */
-    fun wbReady(): Boolean = baseGains != null && info?.manualPost == true
+    fun wbReady(): Boolean = baseGains != null && baseTransform != null && info?.manualPost == true
 
     // ---------------------------------------------------------------- abrir / fechar
 
     fun open(inf: CamInfo, target: Surface, state: CamState) {
+        val token = ++generation
         info = inf
         surface = target
         snapshot = state.copy()
@@ -189,18 +203,20 @@ class CameraEngine(ctx: Context, private val listener: Listener) {
             try {
                 manager.openCamera(inf.id, object : CameraDevice.StateCallback() {
                     override fun onOpened(camera: CameraDevice) {
+                        if (token != generation) { camera.close(); return }
                         device = camera
-                        createSession()
+                        createSession(token)
                     }
 
                     override fun onDisconnected(camera: CameraDevice) {
                         camera.close()
-                        device = null
+                        if (device === camera) device = null
                     }
 
                     override fun onError(camera: CameraDevice, error: Int) {
                         camera.close()
-                        device = null
+                        if (device === camera) device = null
+                        if (token != generation) return
                         listener.onError("Erro ao abrir a câmera (código $error)")
                     }
                 }, handler)
@@ -214,12 +230,13 @@ class CameraEngine(ctx: Context, private val listener: Listener) {
     }
 
     @Suppress("DEPRECATION")
-    private fun createSession() {
+    private fun createSession(token: Int) {
         val dev = device ?: return
         val s = surface ?: return
         try {
             dev.createCaptureSession(listOf(s), object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(sess: CameraCaptureSession) {
+                    if (token != generation) { sess.close(); return }
                     session = sess
                     applyNow()
                 }
@@ -235,6 +252,8 @@ class CameraEngine(ctx: Context, private val listener: Listener) {
     }
 
     fun close() {
+        generation++
+        val done = CountDownLatch(1)
         handler.post {
             try {
                 session?.close()
@@ -246,7 +265,9 @@ class CameraEngine(ctx: Context, private val listener: Listener) {
             }
             session = null
             device = null
+            done.countDown()
         }
+        try { done.await(2, TimeUnit.SECONDS) } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
     }
 
     fun destroy() {
@@ -284,7 +305,7 @@ class CameraEngine(ctx: Context, private val listener: Listener) {
                 b.set(CaptureRequest.SENSOR_SENSITIVITY, st.iso.coerceIn(inf.isoRange.lower, inf.isoRange.upper))
                 b.set(
                     CaptureRequest.SENSOR_EXPOSURE_TIME,
-                    st.exposureNs.coerceIn(inf.expRange.lower, inf.expRange.upper)
+                    st.exposureNs.coerceIn(inf.expRange.lower, minOf(inf.expRange.upper, maxOf(inf.expRange.lower, 1_000_000_000L / st.fps)))
                 )
                 b.set(CaptureRequest.SENSOR_FRAME_DURATION, 1_000_000_000L / st.fps)
             } else {
@@ -298,17 +319,17 @@ class CameraEngine(ctx: Context, private val listener: Listener) {
 
             // foco
             if (inf.minFocusDiopter > 0f) {
-                if (st.afManual && inf.manualSensor) {
+                if (st.afManual && inf.manualFocus) {
                     b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_OFF)
                     b.set(CaptureRequest.LENS_FOCUS_DISTANCE, st.focusDiopter.coerceIn(0f, inf.minFocusDiopter))
                 } else {
-                    b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+                    b.set(CaptureRequest.CONTROL_AF_MODE, inf.autoFocusMode)
                 }
             }
 
             // balanço de branco
             val base = baseGains
-            if (st.awbManual && inf.manualPost && base != null) {
+            if (st.awbManual && inf.manualPost && base != null && baseTransform != null) {
                 val f = WhiteBalance.relativeGains(st.kelvin.toFloat())
                 var r = base.red * f[0]
                 var ge = base.greenEven * f[1]
@@ -326,7 +347,7 @@ class CameraEngine(ctx: Context, private val listener: Listener) {
                     CaptureRequest.COLOR_CORRECTION_MODE,
                     CameraMetadata.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX
                 )
-                b.set(CaptureRequest.COLOR_CORRECTION_GAINS, RggbChannelVector(r, ge, go, bl))
+                b.set(CaptureRequest.COLOR_CORRECTION_GAINS, RggbChannelVector(r.coerceIn(1f, 8f), ge.coerceIn(1f, 8f), go.coerceIn(1f, 8f), bl.coerceIn(1f, 8f)))
                 b.set(CaptureRequest.COLOR_CORRECTION_TRANSFORM, baseTransform ?: IDENTITY)
             } else {
                 b.set(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_AUTO)
@@ -345,13 +366,15 @@ class CameraEngine(ctx: Context, private val listener: Listener) {
             request: CaptureRequest,
             result: TotalCaptureResult
         ) {
+            if (session !== this@CameraEngine.session) return
             result.get(CaptureResult.SENSOR_SENSITIVITY)?.let { lastIso = it }
             result.get(CaptureResult.SENSOR_EXPOSURE_TIME)?.let { lastExposureNs = it }
             result.get(CaptureResult.LENS_FOCUS_DISTANCE)?.let { lastFocus = it }
-            if (!snapshot.awbManual) {
+            if (request.get(CaptureRequest.CONTROL_AWB_MODE) == CameraMetadata.CONTROL_AWB_MODE_AUTO) {
                 result.get(CaptureResult.COLOR_CORRECTION_GAINS)?.let { baseGains = it }
                 result.get(CaptureResult.COLOR_CORRECTION_TRANSFORM)?.let { baseTransform = it }
             }
+            if (snapshot.awbManual && wbReady() && request.get(CaptureRequest.CONTROL_AWB_MODE) == CameraMetadata.CONTROL_AWB_MODE_AUTO) applyNow()
             val now = SystemClock.uptimeMillis()
             if (now - lastNotify > 250) {
                 lastNotify = now

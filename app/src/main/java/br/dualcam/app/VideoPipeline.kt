@@ -50,7 +50,7 @@ class VideoPipeline {
     private var realtimeTs = true
 
     @Volatile
-    var flip180 = false
+    var rotationDegrees = 0
 
     @Volatile
     var zebra = false
@@ -65,6 +65,8 @@ class VideoPipeline {
     private var targets: List<Target> = emptyList()
     private var recorder: Recorder? = null
     private var released = false
+    private var errorReported = false
+    private var reportError: (String) -> Unit = {}
 
     // ---------------------------------------------------------------- ciclo de vida
 
@@ -75,15 +77,18 @@ class VideoPipeline {
         camH: Int,
         cropW: Int,
         realtimeTimestamps: Boolean,
+        onError: (String) -> Unit,
         onReady: (Surface) -> Unit
     ) {
         handler.post {
             try {
+                reportError = onError
                 realtimeTs = realtimeTimestamps
                 initEgl()
                 previewSurface = EGL14.eglCreateWindowSurface(
                     eglDisplay, eglConfig, previewSurf, intArrayOf(EGL14.EGL_NONE), 0
                 )
+                check(previewSurface != EGL14.EGL_NO_SURFACE) { "Falha ao criar a prévia" }
                 makeCurrent(previewSurface)
                 EGL14.eglSwapInterval(eglDisplay, 0)
                 initGl()
@@ -102,6 +107,7 @@ class VideoPipeline {
                 onReady(s)
             } catch (e: Exception) {
                 Log.e(TAG, "Falha ao iniciar pipeline", e)
+                onError("Falha na imagem da câmera: ${e.message}")
             }
         }
     }
@@ -142,6 +148,7 @@ class VideoPipeline {
                     )
                     if (previewSurface != EGL14.EGL_NO_SURFACE) EGL14.eglDestroySurface(eglDisplay, previewSurface)
                     if (eglContext != EGL14.EGL_NO_CONTEXT) EGL14.eglDestroyContext(eglDisplay, eglContext)
+                    EGL14.eglTerminate(eglDisplay)
                     EGL14.eglReleaseThread()
                 }
                 previewSurface = EGL14.EGL_NO_SURFACE
@@ -175,6 +182,7 @@ class VideoPipeline {
                 val sv = EGL14.eglCreateWindowSurface(
                     eglDisplay, eglConfig, rec.portrait.inputSurface, intArrayOf(EGL14.EGL_NONE), 0
                 )
+                check(sh != EGL14.EGL_NO_SURFACE && sv != EGL14.EGL_NO_SURFACE) { "Encoders simultâneos indisponíveis nesta configuração" }
                 targets = listOf(Target(rec.landscape, sh, false), Target(rec.portrait, sv, true))
                 recorder = rec
                 onResult(true, null)
@@ -238,7 +246,7 @@ class VideoPipeline {
             val h = dim[0]
             if (w > 0 && h > 0) {
                 GLES20.glViewport(0, 0, w, h)
-                draw(if (flip180) texFlip else texFull, zebra)
+                draw(oriented(texFull), zebra)
                 EGL14.eglSwapBuffers(eglDisplay, previewSurface)
             }
 
@@ -249,7 +257,7 @@ class VideoPipeline {
                 for (t in targets) {
                     makeCurrent(t.surface)
                     GLES20.glViewport(0, 0, t.enc.width, t.enc.height)
-                    draw(if (t.cropped) texCrop else texFull, false)
+                    draw(oriented(if (t.cropped) texCrop else texFull), false)
                     EGLExt.eglPresentationTimeANDROID(eglDisplay, t.surface, pts)
                     EGL14.eglSwapBuffers(eglDisplay, t.surface)
                     t.enc.drain()
@@ -257,8 +265,27 @@ class VideoPipeline {
             }
         } catch (e: Exception) {
             Log.e(TAG, "Erro ao desenhar quadro", e)
+            if (!errorReported) { errorReported = true; reportError("Falha ao renderizar a câmera: ${e.message}") }
         }
     }
+
+    // Rotate in normalized texture space before SurfaceTexture applies its device transform.
+    private fun oriented(source: FloatBuffer): FloatBuffer {
+        val out = FloatArray(8)
+        for (i in 0..3) {
+            val x = source.get(i * 2); val y = source.get(i * 2 + 1)
+            val pair = when (rotationDegrees) {
+                90 -> y to 1f - x
+                180 -> 1f - x to 1f - y
+                270 -> 1f - y to x
+                else -> x to y
+            }
+            out[i * 2] = pair.first; out[i * 2 + 1] = pair.second
+        }
+        rotated.position(0); rotated.put(out); rotated.position(0)
+        return rotated
+    }
+    private val rotated = floatBuf(FloatArray(8))
 
     private fun draw(texCoords: FloatBuffer, zebraOn: Boolean) {
         GLES20.glUseProgram(program)
@@ -277,7 +304,7 @@ class VideoPipeline {
     // ---------------------------------------------------------------- EGL / GL
 
     private fun makeCurrent(s: EGLSurface) {
-        EGL14.eglMakeCurrent(eglDisplay, s, s, eglContext)
+        check(EGL14.eglMakeCurrent(eglDisplay, s, s, eglContext)) { "Contexto de imagem indisponível (EGL ${EGL14.eglGetError()})" }
     }
 
     private fun initEgl() {

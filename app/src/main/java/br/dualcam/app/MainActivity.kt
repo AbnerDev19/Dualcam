@@ -2,6 +2,7 @@ package br.dualcam.app
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.hardware.display.DisplayManager
@@ -62,7 +63,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
     private var fpsOptions: List<Int> = listOf(30)
     private var isoList: List<Int> = listOf(100)
     private var shutterList: List<Long> = listOf(16_666_666L)
-    private var useHevc = true
+    private var useHevc = false
     private var zebra = false
     private var grid = false
     private var selectedParam: Param? = null
@@ -72,6 +73,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
     private var started = false
     private var permissionsAsked = false
     private var recording = false
+    private var recordingTransition = false
     private var recStartMs = 0L
 
     private val ui = Handler(Looper.getMainLooper())
@@ -88,7 +90,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
         override fun onDisplayAdded(displayId: Int) {}
         override fun onDisplayRemoved(displayId: Int) {}
         override fun onDisplayChanged(displayId: Int) {
-            info?.let { pipeline?.flip180 = relativeRotation(it) == 180 }
+            if (!recording && !recordingTransition) info?.let { pipeline?.rotationDegrees = relativeRotation(it) }
         }
     }
 
@@ -219,9 +221,10 @@ class MainActivity : Activity(), CameraEngine.Listener {
         return inf.sizes.filter { s ->
             val ar = s.width.toFloat() / s.height.toFloat()
             ar in 1.30f..1.80f &&
-                s.width in 1280..3840 &&
-                CodecUtil.supports(mime, s.width, s.height, 24) &&
-                CodecUtil.supports(mime, CodecUtil.cropWidth(s.height, mime), s.height, 24)
+                s.width in 640..3840 && engine.fpsOptions(inf, s).any { fps ->
+                CodecUtil.supports(mime, s.width, s.height, fps) &&
+                CodecUtil.supports(mime, CodecUtil.cropWidth(s.height, mime), s.height, fps)
+            }
         }.sortedByDescending { it.width * it.height }
     }
 
@@ -259,7 +262,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
             CodecUtil.supports(mime, size.width, size.height, it) &&
                 CodecUtil.supports(mime, cropW, size.height, it)
         }
-        if (opts.isEmpty()) opts = listOf(30)
+        check(opts.isNotEmpty()) { "Sem FPS compatível para esta resolução" }
         fpsOptions = opts
         if (state.fps !in opts) state.fps = if (30 in opts) 30 else opts.first()
         shutterList = Stops.shutterList(inf.expRange.lower, inf.expRange.upper, state.fps)
@@ -277,16 +280,22 @@ class MainActivity : Activity(), CameraEngine.Listener {
         val p = VideoPipeline()
         pipeline = p
         p.zebra = zebra
-        p.flip180 = relativeRotation(inf) == 180
-        p.start(surfaceView.holder.surface, size.width, size.height, cropW, inf.realtimeTs) { camSurface ->
-            engine.open(inf, camSurface, state)
+        p.rotationDegrees = relativeRotation(inf)
+        p.start(surfaceView.holder.surface, size.width, size.height, cropW, inf.realtimeTs, { message ->
+            runOnUiThread { if (pipeline === p) { stopAll(); toast(message) } }
+        }) { camSurface ->
+            runOnUiThread { if (pipeline === p && started && resumed) engine.open(inf, camSurface, state) }
         }
+        bindSeek()
         refreshUi()
     }
 
     private fun stopAll() {
         if (!started) return
         started = false
+        ui.removeCallbacks(tick)
+        recordingTransition = false
+        btnRecord.isEnabled = false
         if (recording) {
             recording = false
             btnRecord.recording = false
@@ -324,11 +333,11 @@ class MainActivity : Activity(), CameraEngine.Listener {
     // ================================================================ CameraEngine.Listener
 
     override fun onInfo() {
-        runOnUiThread { updateChipLabels() }
+        runOnUiThread { if (started) btnRecord.isEnabled = !recordingTransition; updateChipLabels(); updateValueText() }
     }
 
     override fun onError(msg: String) {
-        runOnUiThread { toast(msg) }
+        runOnUiThread { stopAll(); toast(msg + ". Toque RESET para tentar novamente.") }
     }
 
     // ================================================================ interface
@@ -338,6 +347,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
         previewBox = findViewById(R.id.previewBox)
         overlay = findViewById(R.id.overlay)
         btnRecord = findViewById(R.id.btnRecord)
+        btnRecord.isEnabled = false
         txtTimer = findViewById(R.id.txtTimer)
         btnLens = findViewById(R.id.btnLens)
         btnRes = findViewById(R.id.btnRes)
@@ -359,6 +369,15 @@ class MainActivity : Activity(), CameraEngine.Listener {
 
     private fun setupClicks() {
         btnRecord.setOnClickListener { toggleRecording() }
+        findViewById<TextView>(R.id.btnReset).setOnClickListener {
+            if (blockedWhileRecording()) return@setOnClickListener
+            state.aeManual = false; state.afManual = false; state.awbManual = false
+            state.evIndex = 0; state.kelvin = 5500
+            selectedParam = null
+            if (started) engine.apply(state) else tryStart()
+            bindSeek(); refreshUi()
+            toast("Exposição, foco e cores em automático")
+        }
 
         btnLens.setOnClickListener {
             if (blockedWhileRecording()) return@setOnClickListener
@@ -366,34 +385,35 @@ class MainActivity : Activity(), CameraEngine.Listener {
                 toast("Este aparelho só expõe uma câmera traseira ao app")
                 return@setOnClickListener
             }
-            camIndex = (camIndex + 1) % cams.size
-            state.aeManual = false
-            state.awbManual = false
-            state.afManual = false
-            selectedParam = null
-            restartCamera()
+            choose("Lente traseira", cams.map { id ->
+                val mm = runCatching { engine.loadInfo(id).equivMm }.getOrDefault(0)
+                "Câmera $id" + if (mm > 0) " · ${mm}mm" else ""
+            }, camIndex) { index ->
+                camIndex = index
+                state.aeManual = false; state.awbManual = false; state.afManual = false
+                state.evIndex = 0; selectedParam = null
+                restartCamera()
+            }
         }
 
         btnRes.setOnClickListener {
             if (blockedWhileRecording() || sizes.size < 2) return@setOnClickListener
-            sizeIndex = (sizeIndex + 1) % sizes.size
-            val inf = info
-            if (inf != null) updateFpsOptions(inf)
-            restartCamera()
+            choose("Resolução", sizes.map { "${it.width} × ${it.height}" }, sizeIndex) { index ->
+                sizeIndex = index
+                info?.let { updateFpsOptions(it) }
+                restartCamera()
+            }
         }
 
         btnFps.setOnClickListener {
             if (blockedWhileRecording() || fpsOptions.size < 2) return@setOnClickListener
             val inf = info ?: return@setOnClickListener
-            val i = fpsOptions.indexOf(state.fps)
-            state.fps = fpsOptions[(i + 1) % fpsOptions.size]
-            shutterList = Stops.shutterList(inf.expRange.lower, inf.expRange.upper, state.fps)
-            if (state.aeManual) {
-                state.exposureNs = shutterList[Stops.nearest(shutterList, state.exposureNs.toDouble())]
+            choose("Quadros por segundo", fpsOptions.map { "$it fps" }, fpsOptions.indexOf(state.fps)) { index ->
+                state.fps = fpsOptions[index]
+                shutterList = Stops.shutterList(inf.expRange.lower, inf.expRange.upper, state.fps)
+                if (state.aeManual) state.exposureNs = shutterList[Stops.nearest(shutterList, state.exposureNs.toDouble())]
+                engine.apply(state); bindSeek(); refreshUi()
             }
-            engine.apply(state)
-            bindSeek()
-            refreshUi()
         }
 
         btnCodec.setOnClickListener {
@@ -452,9 +472,18 @@ class MainActivity : Activity(), CameraEngine.Listener {
         }
     }
 
+    private fun choose(title: String, labels: List<String>, selected: Int, onSelect: (Int) -> Unit) {
+        AlertDialog.Builder(this).setTitle(title)
+            .setSingleChoiceItems(labels.toTypedArray(), selected) { dialog, index ->
+                dialog.dismiss()
+                if (!blockedWhileRecording()) onSelect(index)
+            }.setNegativeButton("Cancelar", null).show()
+    }
+
     private fun blockedWhileRecording(): Boolean {
-        if (recording) toast("Pare a gravação para mudar isto")
-        return recording
+        val blocked = recording || recordingTransition
+        if (blocked) toast("Aguarde o fim da gravação para mudar isto")
+        return blocked
     }
 
     private fun selectParam(p: Param) {
@@ -500,13 +529,22 @@ class MainActivity : Activity(), CameraEngine.Listener {
                 } else 0
             }
         }
+        val available = when (p) {
+            Param.ISO, Param.SHUTTER -> inf.manualSensor
+            Param.WB -> inf.manualPost
+            Param.FOCUS -> inf.manualFocus && inf.minFocusDiopter > 0f
+            Param.EV -> inf.evRange.lower != inf.evRange.upper
+        }
+        seek.isEnabled = available
+        btnAuto.isEnabled = available
+        txtParam.text = txtParam.text.toString() + if (available) "" else " · indisponível"
         updateValueText()
     }
 
     private fun onSeek(progress: Int) {
         val inf = info ?: return
         when (selectedParam) {
-            Param.EV -> state.evIndex = inf.evRange.lower + progress
+            Param.EV -> { state.aeManual = false; state.evIndex = inf.evRange.lower + progress }
             Param.ISO -> {
                 if (!enterManualExposure()) return
                 state.iso = isoList[progress.coerceIn(0, isoList.size - 1)]
@@ -561,7 +599,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
 
     private fun enterManualFocus(): Boolean {
         val inf = info ?: return false
-        if (!inf.manualSensor || inf.minFocusDiopter <= 0f) {
+        if (!inf.manualFocus || inf.minFocusDiopter <= 0f) {
             toast("Esta lente tem foco fixo ou não libera foco manual")
             return false
         }
@@ -634,7 +672,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
             else -> false
         }
         btnAuto.visibility = if (selectedParam == Param.EV) View.INVISIBLE else View.VISIBLE
-        btnAuto.text = if (manual) "AUTO" else "AUTO ✓"
+        btnAuto.text = if (manual) "MANUAL · AUTO?" else "AUTO · MANUAL?"
         style(btnAuto, false, !manual)
     }
 
@@ -657,6 +695,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
     // ================================================================ gravação
 
     private fun toggleRecording() {
+        if (!btnRecord.isEnabled) return
         val p = pipeline ?: return
         val inf = info ?: return
         val size = sizes.getOrNull(sizeIndex) ?: return
@@ -665,14 +704,17 @@ class MainActivity : Activity(), CameraEngine.Listener {
             val mime = currentMime()
             val cropW = CodecUtil.cropWidth(size.height, mime)
             val fps = state.fps
-            val rotation = relativeRotation(inf)
+            val rotation = 0
             val audio = hasAudioPermission()
             val app = applicationContext
+            recordingTransition = true
             btnRecord.isEnabled = false
             p.startRecording(
                 { Recorder.create(app, size.width, size.height, cropW, fps, mime, rotation, audio) }
             ) { ok, err ->
                 runOnUiThread {
+                    if (pipeline !== p || !resumed) return@runOnUiThread
+                    recordingTransition = false
                     btnRecord.isEnabled = true
                     if (ok) {
                         recording = true
@@ -689,9 +731,13 @@ class MainActivity : Activity(), CameraEngine.Listener {
                 }
             }
         } else {
+            recordingTransition = true
             btnRecord.isEnabled = false
             p.stopRecording { names ->
                 runOnUiThread {
+                    if (pipeline !== p || !resumed) return@runOnUiThread
+                    recordingTransition = false
+                    ui.removeCallbacks(tick)
                     recording = false
                     btnRecord.isEnabled = true
                     btnRecord.recording = false
