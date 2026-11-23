@@ -53,12 +53,11 @@ class AudioPump(private val sinks: List<MuxerSink>) {
                 setInteger(MediaFormat.KEY_BIT_RATE, 128_000)
                 setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
             }
+            record = rec
             val c = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
+            codec = c
             c.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             c.start()
-
-            record = rec
-            codec = c
             running = true
             rec.startRecording()
             thread = Thread({ loop() }, "audio-pump").also { it.start() }
@@ -86,24 +85,32 @@ class AudioPump(private val sinks: List<MuxerSink>) {
         var totalSamples = 0L
         var anchorUs = -1L
 
-        while (running) {
-            val n = rec.read(buf, 0, buf.size)
-            if (n < 0) break
-            if (n == 0) continue
-            if (anchorUs < 0) {
-                val chunkUs = (n / 2) * 1_000_000L / sampleRate
-                anchorUs = maxOf(0L, (Clock.nowNs() - startNs) / 1000L - chunkUs)
+        try {
+            while (running) {
+                val n = rec.read(buf, 0, buf.size)
+                if (n < 0) break
+                if (n == 0) continue
+                if (anchorUs < 0) {
+                    val chunkUs = (n / 2) * 1_000_000L / sampleRate
+                    anchorUs = maxOf(0L, (Clock.nowNs() - startNs) / 1000L - chunkUs)
+                }
+                val ptsUs = anchorUs + totalSamples * 1_000_000L / sampleRate
+                feed(c, buf, n, ptsUs, 0)
+                totalSamples += (n / 2).toLong()
+                drain(c, false)
             }
-            val ptsUs = anchorUs + totalSamples * 1_000_000L / sampleRate
-            feed(c, buf, n, ptsUs, 0)
-            totalSamples += (n / 2).toLong()
-            drain(c, false)
-        }
 
-        val endPts = maxOf(0L, anchorUs) + totalSamples * 1_000_000L / sampleRate
-        feed(c, ByteArray(0), 0, endPts, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-        drain(c, true)
-        cleanup()
+            val endPts = maxOf(0L, anchorUs) + totalSamples * 1_000_000L / sampleRate
+            feed(c, ByteArray(0), 0, endPts, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+            drain(c, true)
+        } catch (e: Exception) {
+            Log.e(TAG, "Falha durante a captura de áudio", e)
+        } finally {
+            for (i in sinks.indices) {
+                if (tracks[i] < 0) runCatching { sinks[i].audioUnavailable() }
+            }
+            cleanup()
+        }
     }
 
     private fun feed(c: MediaCodec, data: ByteArray, n: Int, ptsUs: Long, flags: Int) {

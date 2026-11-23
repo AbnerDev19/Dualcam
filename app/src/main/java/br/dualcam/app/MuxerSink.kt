@@ -40,10 +40,25 @@ class MuxerSink(
         }
         uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
             ?: throw IllegalStateException("Não foi possível criar o arquivo $displayName")
-        pfd = resolver.openFileDescriptor(uri, "rw")
-            ?: throw IllegalStateException("Não foi possível abrir o arquivo $displayName")
-        muxer = MediaMuxer(pfd.fileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
-        muxer.setOrientationHint(rotation)
+        try {
+            pfd = resolver.openFileDescriptor(uri, "rw")
+                ?: throw IllegalStateException("Não foi possível abrir o arquivo $displayName")
+            try {
+                muxer = MediaMuxer(pfd.fileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+                try {
+                    muxer.setOrientationHint(rotation)
+                } catch (e: Exception) {
+                    runCatching { muxer.release() }
+                    throw e
+                }
+            } catch (e: Exception) {
+                runCatching { pfd.close() }
+                throw e
+            }
+        } catch (e: Exception) {
+            runCatching { resolver.delete(uri, null, null) }
+            throw e
+        }
     }
 
     @Synchronized
@@ -99,10 +114,10 @@ class MuxerSink(
 
     /** Fecha o arquivo. Retorna true se o vídeo ficou válido e foi publicado na galeria. */
     @Synchronized
-    fun finish(): Boolean {
+    fun finish(publish: Boolean = true): Boolean {
         if (finished) return false
         finished = true
-        var ok = started
+        var ok = started && publish
         try {
             if (started) muxer.stop()
         } catch (e: Exception) {

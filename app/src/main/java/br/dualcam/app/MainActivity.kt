@@ -279,12 +279,13 @@ class MainActivity : Activity(), CameraEngine.Listener {
 
         val p = VideoPipeline()
         pipeline = p
+        overlay.cropLeft = { p.cropLeft }
         p.zebra = zebra
         p.rotationDegrees = relativeRotation(inf)
-        p.start(surfaceView.holder.surface, size.width, size.height, cropW, inf.realtimeTs, { message ->
+        p.start(surfaceView.holder.surface, size.width, size.height, cropW, inf.realtimeTs, { engine.facePosition }, { message ->
             runOnUiThread { if (pipeline === p) { stopAll(); toast(message) } }
         }) { camSurface ->
-            runOnUiThread { if (pipeline === p && started && resumed) engine.open(inf, camSurface, state) }
+            runOnUiThread { if (pipeline === p && started && resumed) engine.open(inf, camSurface, size, state) }
         }
         bindSeek()
         refreshUi()
@@ -306,6 +307,8 @@ class MainActivity : Activity(), CameraEngine.Listener {
         engine.close()
         pipeline?.releaseAndWait()
         pipeline = null
+        overlay.cropLeft = null
+        overlay.invalidate()
     }
 
     private fun overlayFraction(): Float {
@@ -697,7 +700,6 @@ class MainActivity : Activity(), CameraEngine.Listener {
     private fun toggleRecording() {
         if (!btnRecord.isEnabled) return
         val p = pipeline ?: return
-        val inf = info ?: return
         val size = sizes.getOrNull(sizeIndex) ?: return
 
         if (!recording) {

@@ -15,6 +15,8 @@ class CropOverlayView @JvmOverloads constructor(
     attrs: AttributeSet? = null
 ) : View(context, attrs) {
 
+    var cropLeft: (() -> Float?)? = null
+
     private var cropFraction = 0.3164f
     private var showGrid = false
     private var recording = false
@@ -55,7 +57,8 @@ class CropOverlayView @JvmOverloads constructor(
         if (w <= 0f || h <= 0f) return
 
         val cw = w * cropFraction
-        val left = (w - cw) / 2f
+        val left = (cropLeft?.invoke() ?: ((1f - cropFraction) / 2f)) * w
+        if (cropLeft != null) postInvalidateDelayed(33L)
         val right = left + cw
 
         // escurece o que NÃO entra no vídeo vertical
