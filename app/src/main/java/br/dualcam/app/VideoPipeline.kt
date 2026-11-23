@@ -18,12 +18,13 @@ import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import kotlin.math.exp
 
 /**
  * Coração do app: a câmera escreve num SurfaceTexture; uma thread OpenGL desenha cada quadro
  *  1) no preview (quadro inteiro, horizontal),
  *  2) no encoder do arquivo horizontal (quadro inteiro),
- *  3) no encoder do arquivo vertical (recorte central 9:16 do MESMO quadro).
+ *  3) no encoder do arquivo vertical (recorte móvel 9:16 do MESMO quadro).
  * Tudo vem do mesmo sensor, no mesmo instante, então os dois arquivos ficam perfeitamente sincronizados.
  */
 class VideoPipeline {
@@ -57,8 +58,16 @@ class VideoPipeline {
 
     private val vertexBuf = floatBuf(floatArrayOf(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f))
     private val texFull = floatBuf(floatArrayOf(0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f))
-    private val texFlip = floatBuf(floatArrayOf(1f, 1f, 0f, 1f, 1f, 0f, 0f, 0f))
-    private var texCrop: FloatBuffer = texFull
+    private val texCrop = floatBuf(FloatArray(8))
+    private var cropFraction = 0f
+    private var cropCenter = 0.5f
+    private var lastCropNs = 0L
+    private var lastCropRotation = -1
+    private var facePosition: () -> CameraEngine.FacePosition? = { null }
+
+    @Volatile
+    var cropLeft = 0f
+        private set
 
     private class Target(val enc: VideoEncoder, val surface: EGLSurface, val cropped: Boolean)
 
@@ -77,6 +86,7 @@ class VideoPipeline {
         camH: Int,
         cropW: Int,
         realtimeTimestamps: Boolean,
+        facePosition: () -> CameraEngine.FacePosition?,
         onError: (String) -> Unit,
         onReady: (Surface) -> Unit
     ) {
@@ -93,10 +103,9 @@ class VideoPipeline {
                 EGL14.eglSwapInterval(eglDisplay, 0)
                 initGl()
 
-                val f = cropW.toFloat() / camW.toFloat()
-                val x0 = (1f - f) / 2f
-                val x1 = 1f - x0
-                texCrop = floatBuf(floatArrayOf(x0, 0f, x1, 0f, x0, 1f, x1, 1f))
+                this.facePosition = facePosition
+                cropFraction = cropW.toFloat() / camW
+                cropLeft = (1f - cropFraction) / 2f
 
                 val st = SurfaceTexture(texId)
                 st.setDefaultBufferSize(camW, camH)
@@ -172,14 +181,16 @@ class VideoPipeline {
     fun startRecording(factory: () -> Recorder, onResult: (Boolean, String?) -> Unit) {
         handler.post {
             var rec: Recorder? = null
+            var sh = EGL14.EGL_NO_SURFACE
+            var sv = EGL14.EGL_NO_SURFACE
             try {
                 if (released) throw IllegalStateException("Câmera não está ativa")
                 if (recorder != null) throw IllegalStateException("Já está gravando")
                 rec = factory()
-                val sh = EGL14.eglCreateWindowSurface(
+                sh = EGL14.eglCreateWindowSurface(
                     eglDisplay, eglConfig, rec.landscape.inputSurface, intArrayOf(EGL14.EGL_NONE), 0
                 )
-                val sv = EGL14.eglCreateWindowSurface(
+                sv = EGL14.eglCreateWindowSurface(
                     eglDisplay, eglConfig, rec.portrait.inputSurface, intArrayOf(EGL14.EGL_NONE), 0
                 )
                 check(sh != EGL14.EGL_NO_SURFACE && sv != EGL14.EGL_NO_SURFACE) { "Encoders simultâneos indisponíveis nesta configuração" }
@@ -188,6 +199,8 @@ class VideoPipeline {
                 onResult(true, null)
             } catch (e: Exception) {
                 Log.e(TAG, "Falha ao iniciar gravação", e)
+                if (sh != EGL14.EGL_NO_SURFACE) EGL14.eglDestroySurface(eglDisplay, sh)
+                if (sv != EGL14.EGL_NO_SURFACE) EGL14.eglDestroySurface(eglDisplay, sv)
                 try {
                     rec?.finish()
                 } catch (e2: Exception) {
@@ -236,7 +249,10 @@ class VideoPipeline {
             makeCurrent(previewSurface)
             st.updateTexImage()
             st.getTransformMatrix(stMatrix)
-            val ts = if (realtimeTs) st.timestamp else Clock.nowNs()
+            val now = Clock.nowNs()
+            val ts = if (realtimeTs) st.timestamp else now
+            val rotation = rotationDegrees
+            updateCrop(now, rotation)
 
             // 1) preview
             val dim = IntArray(1)
@@ -246,8 +262,10 @@ class VideoPipeline {
             val h = dim[0]
             if (w > 0 && h > 0) {
                 GLES20.glViewport(0, 0, w, h)
-                draw(oriented(texFull), zebra)
-                EGL14.eglSwapBuffers(eglDisplay, previewSurface)
+                draw(oriented(texFull, rotation), zebra)
+                check(EGL14.eglSwapBuffers(eglDisplay, previewSurface)) {
+                    "A prévia perdeu a superfície (EGL ${EGL14.eglGetError()})"
+                }
             }
 
             // 2) e 3) encoders
@@ -257,9 +275,11 @@ class VideoPipeline {
                 for (t in targets) {
                     makeCurrent(t.surface)
                     GLES20.glViewport(0, 0, t.enc.width, t.enc.height)
-                    draw(oriented(if (t.cropped) texCrop else texFull), false)
+                    draw(oriented(if (t.cropped) texCrop else texFull, rotation), false)
                     EGLExt.eglPresentationTimeANDROID(eglDisplay, t.surface, pts)
-                    EGL14.eglSwapBuffers(eglDisplay, t.surface)
+                    check(EGL14.eglSwapBuffers(eglDisplay, t.surface)) {
+                        "O encoder deixou de receber quadros (EGL ${EGL14.eglGetError()})"
+                    }
                     t.enc.drain()
                 }
             }
@@ -269,12 +289,38 @@ class VideoPipeline {
         }
     }
 
+    private fun updateCrop(now: Long, rotation: Int) {
+        val face = facePosition()?.takeIf { now - it.seenAtNs <= 1_000_000_000L }
+        val target = if (face == null) 0.5f else when (rotation) {
+            90 -> face.y
+            180 -> 1f - face.x
+            270 -> 1f - face.y
+            else -> face.x
+        }
+        val halfWidth = cropFraction / 2f
+        val bounded = target.coerceIn(halfWidth, 1f - halfWidth)
+        if (rotation != lastCropRotation) {
+            cropCenter = bounded
+        } else {
+            val dt = ((now - lastCropNs) / 1_000_000_000.0).coerceIn(0.0, 0.1)
+            val weight = (1.0 - exp(-dt / 0.22)).toFloat()
+            cropCenter += (bounded - cropCenter) * weight
+        }
+        lastCropRotation = rotation
+        lastCropNs = now
+        val left = cropCenter - halfWidth
+        val right = left + cropFraction
+        texCrop.put(0, left).put(1, 0f).put(2, right).put(3, 0f)
+        texCrop.put(4, left).put(5, 1f).put(6, right).put(7, 1f)
+        cropLeft = left
+    }
+
     // Rotate in normalized texture space before SurfaceTexture applies its device transform.
-    private fun oriented(source: FloatBuffer): FloatBuffer {
+    private fun oriented(source: FloatBuffer, rotation: Int): FloatBuffer {
         val out = FloatArray(8)
         for (i in 0..3) {
             val x = source.get(i * 2); val y = source.get(i * 2 + 1)
-            val pair = when (rotationDegrees) {
+            val pair = when (rotation) {
                 90 -> y to 1f - x
                 180 -> 1f - x to 1f - y
                 270 -> 1f - y to x

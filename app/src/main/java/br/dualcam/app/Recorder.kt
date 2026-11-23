@@ -1,6 +1,7 @@
 package br.dualcam.app
 
 import android.content.Context
+import android.util.Log
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -21,12 +22,15 @@ class Recorder private constructor(
     /** Encerra tudo e devolve os nomes dos arquivos salvos. */
     fun finish(): List<String> {
         audio?.stop()
-        landscape.finish()
-        portrait.finish()
-        val saved = ArrayList<String>()
-        if (sinkH.finish()) saved.add(sinkH.displayName)
-        if (sinkV.finish()) saved.add(sinkV.displayName)
-        return saved
+        return listOf(landscape to sinkH, portrait to sinkV).mapNotNull { (encoder, sink) ->
+            val drained = runCatching { encoder.finish() }
+                .onFailure { Log.e("Recorder", "Falha ao finalizar o encoder", it) }
+                .isSuccess
+            runCatching { sink.finish(publish = drained) }
+                .onFailure { Log.e("Recorder", "Falha ao fechar o arquivo", it) }
+                .getOrDefault(false)
+                .let { saved -> if (saved) sink.displayName else null }
+        }
     }
 
     companion object {
@@ -55,8 +59,8 @@ class Recorder private constructor(
             } catch (e: Exception) {
                 encH?.release()
                 encV?.release()
-                sinkH.finish()
-                sinkV?.finish()
+                runCatching { sinkH.finish(publish = false) }
+                runCatching { sinkV?.finish(publish = false) }
                 throw e
             }
 

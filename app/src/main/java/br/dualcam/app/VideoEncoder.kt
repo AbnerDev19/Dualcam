@@ -30,9 +30,17 @@ class VideoEncoder(
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
         }
-        codec.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        inputSurface = codec.createInputSurface()
-        codec.start()
+        var surface: Surface? = null
+        try {
+            codec.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            inputSurface = codec.createInputSurface()
+            surface = inputSurface
+            codec.start()
+        } catch (e: Exception) {
+            runCatching { codec.release() }
+            runCatching { surface?.release() }
+            throw e
+        }
     }
 
     /** Escoa o que o encoder já terminou, sem bloquear. */
@@ -42,10 +50,10 @@ class VideoEncoder(
     fun finish() {
         try {
             codec.signalEndOfInputStream()
-        } catch (e: Exception) {
+            drainInternal(true)
+        } finally {
+            release()
         }
-        drainInternal(true)
-        release()
     }
 
     private fun drainInternal(eos: Boolean) {

@@ -1,6 +1,7 @@
 package br.dualcam.app
 
 import android.content.Context
+import android.graphics.Rect
 import android.graphics.SurfaceTexture
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
@@ -57,6 +58,8 @@ class CamInfo(
     val evStep: Float,
     val equivMm: Int,
     val hasOis: Boolean,
+    val faceMode: Int,
+    val activeArray: Rect?,
     val map: StreamConfigurationMap
 )
 
@@ -75,6 +78,14 @@ class CameraEngine(ctx: Context, private val listener: Listener) {
     private var session: CameraCaptureSession? = null
     private var surface: Surface? = null
     private var info: CamInfo? = null
+
+    data class FacePosition(val x: Float, val y: Float, val seenAtNs: Long)
+
+    @Volatile
+    var facePosition: FacePosition? = null
+        private set
+
+    private var streamAspect = 1f
 
     @Volatile
     private var snapshot = CamState()
@@ -168,6 +179,9 @@ class CameraEngine(ctx: Context, private val listener: Listener) {
             evStep = evStep,
             equivMm = equiv,
             hasOis = ois,
+            faceMode = c.get(CameraCharacteristics.STATISTICS_INFO_AVAILABLE_FACE_DETECT_MODES)
+                ?.maxOrNull() ?: CameraMetadata.STATISTICS_FACE_DETECT_MODE_OFF,
+            activeArray = c.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE),
             map = map
         )
     }
@@ -192,7 +206,7 @@ class CameraEngine(ctx: Context, private val listener: Listener) {
 
     // ---------------------------------------------------------------- abrir / fechar
 
-    fun open(inf: CamInfo, target: Surface, state: CamState) {
+    fun open(inf: CamInfo, target: Surface, size: Size, state: CamState) {
         val token = ++generation
         info = inf
         surface = target
@@ -200,6 +214,8 @@ class CameraEngine(ctx: Context, private val listener: Listener) {
         baseGains = null
         baseTransform = null
         handler.post {
+            facePosition = null
+            streamAspect = size.width.toFloat() / size.height
             try {
                 manager.openCamera(inf.id, object : CameraDevice.StateCallback() {
                     override fun onOpened(camera: CameraDevice) {
@@ -242,6 +258,8 @@ class CameraEngine(ctx: Context, private val listener: Listener) {
                 }
 
                 override fun onConfigureFailed(sess: CameraCaptureSession) {
+                    sess.close()
+                    if (token != generation) return
                     listener.onError("Falha ao configurar a sessão da câmera (resolução não aceita?)")
                 }
             }, handler)
@@ -292,6 +310,9 @@ class CameraEngine(ctx: Context, private val listener: Listener) {
             val b = dev.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
             b.addTarget(s)
             b.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
+            if (inf.faceMode != CameraMetadata.STATISTICS_FACE_DETECT_MODE_OFF) {
+                b.set(CaptureRequest.STATISTICS_FACE_DETECT_MODE, inf.faceMode)
+            }
             if (inf.hasOis) {
                 b.set(
                     CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
@@ -360,6 +381,28 @@ class CameraEngine(ctx: Context, private val listener: Listener) {
         }
     }
 
+    private fun updateFace(result: TotalCaptureResult) {
+        val region = result.get(CaptureResult.SCALER_CROP_REGION) ?: info?.activeArray ?: return
+        if (region.isEmpty) return
+        val width = minOf(region.width().toFloat(), region.height() * streamAspect)
+        val height = width / streamAspect
+        val left = region.exactCenterX() - width / 2
+        val top = region.exactCenterY() - height / 2
+        val face = result.get(CaptureResult.STATISTICS_FACES)
+            ?.filter { face ->
+                val x = face.bounds.exactCenterX()
+                val y = face.bounds.exactCenterY()
+                x in left..(left + width) && y in top..(top + height)
+            }
+            ?.maxByOrNull { it.bounds.width().toLong() * it.bounds.height() }
+            ?: return
+        facePosition = FacePosition(
+            (face.bounds.exactCenterX() - left) / width,
+            (face.bounds.exactCenterY() - top) / height,
+            Clock.nowNs()
+        )
+    }
+
     private val captureCb = object : CameraCaptureSession.CaptureCallback() {
         override fun onCaptureCompleted(
             session: CameraCaptureSession,
@@ -367,6 +410,7 @@ class CameraEngine(ctx: Context, private val listener: Listener) {
             result: TotalCaptureResult
         ) {
             if (session !== this@CameraEngine.session) return
+            updateFace(result)
             result.get(CaptureResult.SENSOR_SENSITIVITY)?.let { lastIso = it }
             result.get(CaptureResult.SENSOR_EXPOSURE_TIME)?.let { lastExposureNs = it }
             result.get(CaptureResult.LENS_FOCUS_DISTANCE)?.let { lastFocus = it }
